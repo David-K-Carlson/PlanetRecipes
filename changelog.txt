@@ -1,0 +1,11 @@
+Version: 1.0.1
+Date: 07. 06. 2026
+  Changes:
+    - Restores state to previous view when when opening the window
+    - Added basic, rough support for planet mods: Rubia, Cerys, Maraxsis, Vesta, Moshine, Corrundum, Apia-Carnova planet system
+    - Removed Nauvis from the planet tabs
+    - Recipes are generally more likely to show up in the order that they are presented in the tech tree (more beginner tech will typically show up at the top of the list)
+  Optimizations:
+    - GUI is more responsive/faster now
+  Bugfixes:
+    - Fixed search

@@ -1,10 +1,10 @@
 {
   "name": "PlanetRecipes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "title": "Planet Recipes",
   "author": "David K Carlson",
   "factorio_version": "2.1",
-  "description": "Only shows recipes that are specific to the current planet.\n\nHow to use: Click the button in the Shortcut Bar in game (bottom right) to bring up the window with the recipes for the planets.\n\nWhy: When going to a new planet, some people find it difficult to find or remember recipes that are specific to the planet (e.g. Vulcanus).",
+  "description": "Only shows recipes that are specific to the a selected planet.\n\nHow to use: Click the button in the Shortcut Bar in game (bottom right) to bring up the window with the recipes for the planets.\n\nWhy: When going to a new planet, some people find it difficult to find or remember recipes that are specific to the planet (e.g. Vulcanus). This mod is meant to help such people with the 'just starting out' experience on a new planet.\n\nIssues: Some recipes may be included that shouldn't be.",
   "dependencies": [
     "base >= 2.1.0",
     "space-age >= 2.1.0"
