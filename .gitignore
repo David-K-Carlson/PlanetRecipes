@@ -1,0 +1,7 @@
+# Ignore packaged zip files of the mod
+*.zip
+
+# Ignore backup/temp files
+*~
+.DS_Store
+Thumbs.db
