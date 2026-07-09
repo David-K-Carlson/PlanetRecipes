@@ -42,14 +42,51 @@ local function has_unlock_space_location(tech_proto)
   return false
 end
 
+-- Helper function to recursively check if a localized string table contains discovery keywords
+local function localized_string_contains_discovery(val)
+  if type(val) == "string" then
+    local lower = string.lower(val)
+    return string.find(lower, "discovery", 1, true)
+      or string.find(lower, "discover", 1, true)
+  elseif type(val) == "table" then
+    for _, sub_val in pairs(val) do
+      if localized_string_contains_discovery(sub_val) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Helper function to check if a technology is a planet/moon discovery technology
+local function is_discovery_tech(tech_name, tech_proto)
+  if has_unlock_space_location(tech_proto) then
+    return true
+  end
+
+  local lower_name = string.lower(tech_name)
+  if string.find(lower_name, "discovery", 1, true)
+    or string.find(lower_name, "discover", 1, true) then
+    return true
+  end
+
+  if tech_proto and tech_proto.localised_name then
+    if localized_string_contains_discovery(tech_proto.localised_name) then
+      return true
+    end
+  end
+
+  return false
+end
+
 -- Determine if a specific technology is classified as a stop point on a planet
 local function is_technology_stop_point(tech_name, location_name, start_tech)
   local current_proto = prototypes.technology[tech_name]
   if not current_proto then return false end
   
-  -- Stop at planet discovery technologies (except the location's own start tech)
-  local is_planet_discovery = (tech_name ~= start_tech) and has_unlock_space_location(current_proto)
-  if is_planet_discovery then
+  -- Stop at planet/moon discovery technologies (except the location's own start tech)
+  local is_location_discovery = (tech_name ~= start_tech) and is_discovery_tech(tech_name, current_proto)
+  if is_location_discovery then
     if location_name == "vesta" or location_name == "corrundum" then
       return false
     else
@@ -100,6 +137,42 @@ local function is_technology_stop_point(tech_name, location_name, start_tech)
     return true
   end
 
+  return false
+end
+
+-- Helper function to check if a technology is blocked by a stop point on a planet
+local function is_tech_blocked_by_stop_point(tech_name, location_name, start_tech, cache, visited_checking)
+  if tech_name == start_tech then return false end
+  
+  if cache[tech_name] ~= nil then
+    return cache[tech_name]
+  end
+  
+  if is_technology_stop_point(tech_name, location_name, start_tech) then
+    cache[tech_name] = true
+    return true
+  end
+  
+  local proto = prototypes.technology[tech_name]
+  if not proto or not proto.prerequisites then
+    cache[tech_name] = false
+    return false
+  end
+  
+  visited_checking = visited_checking or {}
+  if visited_checking[tech_name] then
+    return false
+  end
+  visited_checking[tech_name] = true
+  
+  for prereq_name, _ in pairs(proto.prerequisites) do
+    if is_tech_blocked_by_stop_point(prereq_name, location_name, start_tech, cache, visited_checking) then
+      cache[tech_name] = true
+      return true
+    end
+  end
+  
+  cache[tech_name] = false
   return false
 end
 
@@ -185,6 +258,7 @@ local function build_recipe_planet_map()
     if start_proto then
       local queue = {start_tech}
       local visited = {[start_tech] = true}
+      local block_cache = {}
       while #queue > 0 do
         local current = table.remove(queue, 1)
         planet_techs[location_name][current] = true
@@ -192,7 +266,7 @@ local function build_recipe_planet_map()
         local is_stop = is_technology_stop_point(current, location_name, start_tech)
         if not is_stop and child_techs[current] then
           for _, child in ipairs(child_techs[current]) do
-            if not visited[child] then
+            if not visited[child] and not is_tech_blocked_by_stop_point(child, location_name, start_tech, block_cache) then
               visited[child] = true
               table.insert(queue, child)
             end
@@ -222,7 +296,7 @@ local function build_recipe_planet_map()
 
         if not is_stop and child_techs[current] then
           for _, child in ipairs(child_techs[current]) do
-            if not visited[child] then
+            if candidates[child] and not visited[child] then
               -- Check if all local prerequisites have been visited
               if can_unlock_tech(child, visited, candidates, location_name, start_tech) then
                 visited[child] = true
