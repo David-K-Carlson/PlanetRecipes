@@ -4,6 +4,9 @@
 local organized_recipes = nil
 local recipe_to_tech = nil
 local tech_orders = nil
+local research_recipes = nil
+local crafting_recipes = nil
+
 
 -- Helper function to recursively check if a localized string table contains keywords
 local function localized_string_contains_keyword(val)
@@ -208,6 +211,37 @@ local function match_query(r_name, query)
   return string.find(norm_r, norm_q, 1, true) ~= nil
 end
 
+-- Helper function to check if a recipe requires being built on a specific planet
+local function recipe_requires_planet(recipe_proto, planet_name)
+  if not recipe_proto or not recipe_proto.surface_conditions then return false end
+  
+  -- Check if it satisfies the planet's properties
+  local planet_proto = prototypes.space_location[planet_name]
+  if not planet_proto or not planet_proto.surface_properties then return false end
+  
+  -- Check if it satisfies the target planet
+  for _, cond in ipairs(recipe_proto.surface_conditions) do
+    local prop_val = planet_proto.surface_properties[cond.property] or 0
+    if cond.min and prop_val < cond.min then return false end
+    if cond.max and prop_val > cond.max then return false end
+  end
+  
+  -- Check if it is NOT satisfied on Nauvis
+  local nauvis_proto = prototypes.space_location["nauvis"]
+  local satisfied_on_nauvis = true
+  if nauvis_proto and nauvis_proto.surface_properties then
+    for _, cond in ipairs(recipe_proto.surface_conditions) do
+      local prop_val = nauvis_proto.surface_properties[cond.property] or 0
+      if cond.min and prop_val < cond.min then satisfied_on_nauvis = false break end
+      if cond.max and prop_val > cond.max then satisfied_on_nauvis = false break end
+    end
+  else
+    satisfied_on_nauvis = false
+  end
+  
+  return not satisfied_on_nauvis
+end
+
 -- Helper function to build the technology graph and categorize recipes by planet/location
 local function build_recipe_planet_map()
   local planet_recipes = {}      -- planet_name -> list of recipe_names
@@ -215,6 +249,8 @@ local function build_recipe_planet_map()
   local tech_to_planets = {}      -- tech_name -> set of planet_names
   local r_to_tech = {}            -- recipe_name -> tech_name (for tooltips)
   local t_orders = {}             -- planet_name -> tech_name -> BFS order index
+  local research_recipe_to_planets = {} -- recipe_name -> set of planet_names
+  local crafting_recipe_to_planets = {} -- recipe_name -> set of planet_names
 
   -- Initialize technology-to-planet map
   for tech_name, _ in pairs(prototypes.technology) do
@@ -293,7 +329,6 @@ local function build_recipe_planet_map()
         current_order = current_order + 1
 
         local is_stop = is_technology_stop_point(current, location_name, start_tech)
-
         if not is_stop and child_techs[current] then
           for _, child in ipairs(child_techs[current]) do
             if candidates[child] and not visited[child] then
@@ -335,11 +370,26 @@ local function build_recipe_planet_map()
         if effect.type == "unlock-recipe" and effect.recipe then
           local r_name = effect.recipe
           recipe_to_planets[r_name] = recipe_to_planets[r_name] or {}
+          research_recipe_to_planets[r_name] = research_recipe_to_planets[r_name] or {}
           for p_name, _ in pairs(planets) do
             recipe_to_planets[r_name][p_name] = true
+            research_recipe_to_planets[r_name][p_name] = true
           end
           r_to_tech[r_name] = tech_name
         end
+      end
+    end
+  end
+
+  -- Map recipes that require being built on a specific planet
+  for recipe_name, recipe_proto in pairs(prototypes.recipe) do
+    for p_name, _ in pairs(starting_techs) do
+      if recipe_requires_planet(recipe_proto, p_name) then
+        recipe_to_planets[recipe_name] = recipe_to_planets[recipe_name] or {}
+        recipe_to_planets[recipe_name][p_name] = true
+        
+        crafting_recipe_to_planets[recipe_name] = crafting_recipe_to_planets[recipe_name] or {}
+        crafting_recipe_to_planets[recipe_name][p_name] = true
       end
     end
   end
@@ -352,12 +402,12 @@ local function build_recipe_planet_map()
     end
   end
 
-  return planet_recipes, r_to_tech, t_orders
+  return planet_recipes, r_to_tech, t_orders, research_recipe_to_planets, crafting_recipe_to_planets
 end
 
 -- Organize recipes for GUI presentation
 local function build_organized_recipes()
-  local planet_recipes, r_to_tech, t_orders = build_recipe_planet_map()
+  local planet_recipes, r_to_tech, t_orders, research_recipes, crafting_recipes = build_recipe_planet_map()
 
   local organized = {} -- planet_name -> group_name -> subgroup_name -> list of recipe_names
   
@@ -376,13 +426,13 @@ local function build_organized_recipes()
     end
   end
 
-  return organized, r_to_tech, t_orders
+  return organized, r_to_tech, t_orders, research_recipes, crafting_recipes
 end
 
 -- Verify cache initialization
 local function verify_cache()
-  if not organized_recipes or not recipe_to_tech or not tech_orders then
-    organized_recipes, recipe_to_tech, tech_orders = build_organized_recipes()
+  if not organized_recipes or not recipe_to_tech or not tech_orders or not research_recipes or not crafting_recipes then
+    organized_recipes, recipe_to_tech, tech_orders, research_recipes, crafting_recipes = build_organized_recipes()
   end
 end
 
@@ -519,6 +569,39 @@ local function rebuild_planet_header(player)
   next_btn.style.font = "default-bold"
 end
 
+-- Rebuild the Sub-tabs Header
+local function rebuild_subtabs(player)
+  local player_state = storage.players[player.index]
+  if not player_state or not player_state.window or not player_state.window.valid then return end
+
+  local subtab_flow = player_state.window.subtab_flow
+  if not subtab_flow or not subtab_flow.valid then return end
+
+  subtab_flow.clear()
+
+  local active_tab = player_state.active_tab or "research"
+
+  local tabs = {
+    {name = "research", caption = {"gui.planet-recipes-tab-recipes"}, tooltip = {"gui.planet-recipes-tab-recipes-tooltip"}},
+    {name = "crafting", caption = {"gui.planet-recipes-tab-planet-reqs"}, tooltip = {"gui.planet-recipes-tab-planet-reqs-tooltip"}}
+  }
+
+  for _, tab in ipairs(tabs) do
+    local is_active = (tab.name == active_tab)
+    local style = is_active and "confirm_button" or "button"
+    local btn = subtab_flow.add({
+      type = "button",
+      caption = tab.caption,
+      tooltip = tab.tooltip,
+      style = style,
+      tags = {action = "select_subtab", subtab = tab.name}
+    })
+    btn.style.font = "default-semibold"
+    btn.style.width = 110
+    btn.style.height = 28
+  end
+end
+
 -- Rebuild the Item Group Column
 local function rebuild_group_column(player)
   verify_cache()
@@ -531,6 +614,14 @@ local function rebuild_group_column(player)
   local group_scroll = main_body.group_scroll
   if not group_scroll or not group_scroll.valid then return end
 
+  local active_tab = player_state.active_tab or "research"
+  if active_tab == "crafting" then
+    group_scroll.visible = false
+    return
+  else
+    group_scroll.visible = true
+  end
+
   local group_column = group_scroll.group_column
   if not group_column or not group_column.valid then return end
 
@@ -539,10 +630,26 @@ local function rebuild_group_column(player)
   local active_planet = player_state.active_planet
   local planet_data = organized_recipes[active_planet] or {}
 
-  -- Get and sort group names
+  local function should_show_recipe(r_name)
+    return research_recipes[r_name] and research_recipes[r_name][active_planet] or false
+  end
+
+  -- Get and sort group names that have at least one recipe in the selected tab
   local group_list = {}
-  for g_name, _ in pairs(planet_data) do
-    table.insert(group_list, g_name)
+  for g_name, group_data in pairs(planet_data) do
+    local has_any_recipe = false
+    for sg_name, recipes in pairs(group_data) do
+      for _, r_name in ipairs(recipes) do
+        if should_show_recipe(r_name) then
+          has_any_recipe = true
+          break
+        end
+      end
+      if has_any_recipe then break end
+    end
+    if has_any_recipe then
+      table.insert(group_list, g_name)
+    end
   end
   table.sort(group_list, function(a, b)
     local order_a = prototypes.item_group[a] and prototypes.item_group[a].order or ""
@@ -560,7 +667,7 @@ local function rebuild_group_column(player)
     for g_name, group_data in pairs(planet_data) do
       for sg_name, recipes in pairs(group_data) do
         for _, r_name in ipairs(recipes) do
-          if match_query(r_name, search_query) then
+          if should_show_recipe(r_name) and match_query(r_name, search_query) then
             has_all_matches = true
             break
           end
@@ -600,7 +707,7 @@ local function rebuild_group_column(player)
       local group_data = planet_data[g_name] or {}
       for sg_name, recipes in pairs(group_data) do
         for _, r_name in ipairs(recipes) do
-          if match_query(r_name, search_query) then
+          if should_show_recipe(r_name) and match_query(r_name, search_query) then
             has_search_matches = true
             break
           end
@@ -652,111 +759,291 @@ local function rebuild_recipe_grid(player)
   local active_planet = player_state.active_planet
   local planet_data = organized_recipes[active_planet] or {}
   local active_group = player_state.active_group
-  
-  -- Gather all recipes matching search query for the selected group(s)
-  local recipes_to_show = {}
-  local search_query = player_state.search_query
+  local active_tab = player_state.active_tab or "research"
 
-  if active_group == "all" then
-    -- Flatten all groups on the active planet into one search set
-    for g_name, group_data in pairs(planet_data) do
+  if active_tab == "crafting" then
+    scroll_pane.style.width = 512
+
+    -- 1. Gather recipes requiring active_planet
+    local group_by_key = {}
+    local recipe_groups = {}
+
+    for recipe_name, planets in pairs(crafting_recipes) do
+      if planets[active_planet] then
+        -- Build sorted planet list for this recipe
+        local p_list = {}
+        for p_name, _ in pairs(planets) do
+          table.insert(p_list, p_name)
+        end
+        table.sort(p_list, function(a, b)
+          if a == "space" then return false end
+          if b == "space" then return true end
+          return a < b
+        end)
+
+        local key = table.concat(p_list, ",")
+        if not group_by_key[key] then
+          group_by_key[key] = {
+            planets = p_list,
+            key = key,
+            recipes = {}
+          }
+          table.insert(recipe_groups, group_by_key[key])
+        end
+        table.insert(group_by_key[key].recipes, recipe_name)
+      end
+    end
+
+    -- 2. Sort the recipe groups (smaller lists first)
+    table.sort(recipe_groups, function(a, b)
+      if #a.planets ~= #b.planets then
+        return #a.planets < #b.planets
+      end
+      return a.key < b.key
+    end)
+
+    -- 3. Draw each group as a row in the scroll pane
+    local search_query = player_state.search_query
+    local displayed_any = false
+
+    local container = scroll_pane.add({
+      type = "flow",
+      direction = "vertical",
+    })
+    container.style.vertical_spacing = 8
+
+    for _, group in ipairs(recipe_groups) do
+      -- Filter recipes in this group by search query
+      local filtered_recipes = {}
+      for _, r_name in ipairs(group.recipes) do
+        if match_query(r_name, search_query) then
+          table.insert(filtered_recipes, r_name)
+        end
+      end
+
+      -- Sort recipes within the row so they look clean and organized
+      table.sort(filtered_recipes, function(a, b)
+        local tech_order_a = get_recipe_tech_order(a, active_planet)
+        local tech_order_b = get_recipe_tech_order(b, active_planet)
+        if tech_order_a ~= tech_order_b then
+          return tech_order_a < tech_order_b
+        end
+        return a < b
+      end)
+
+      if #filtered_recipes > 0 then
+        displayed_any = true
+
+        -- Container for this specific row (planet icons + indented recipe list)
+        local row_container = container.add({
+          type = "flow",
+          direction = "vertical",
+        })
+        row_container.style.vertical_spacing = 2
+
+        -- First line: Planet icons
+        local icons_flow = row_container.add({
+          type = "flow",
+          direction = "horizontal",
+        })
+        icons_flow.style.horizontal_spacing = 2
+        icons_flow.style.vertical_align = "center"
+
+        for _, p_name in ipairs(group.planets) do
+          local sprite_path = "space-location/" .. p_name
+          local tooltip_val = p_name
+          if prototypes.space_location[p_name] then
+            tooltip_val = prototypes.space_location[p_name].localised_name
+          end
+
+          if helpers.is_valid_sprite_path(sprite_path) then
+            local btn = icons_flow.add({
+              type = "sprite-button",
+              sprite = sprite_path,
+              tooltip = tooltip_val,
+              style = "slot_button",
+            })
+            btn.style.width = 28
+            btn.style.height = 28
+          else
+            local txt_btn = icons_flow.add({
+              type = "button",
+              caption = string.sub(p_name, 1, 3):upper(),
+              tooltip = tooltip_val,
+              style = "button",
+            })
+            txt_btn.style.width = 28
+            txt_btn.style.height = 28
+            txt_btn.style.font = "default-mini-bold"
+            txt_btn.style.padding = 0
+          end
+        end
+
+        -- Second line: Indented Arrow and Recipes Table
+        local recipes_flow = row_container.add({
+          type = "flow",
+          direction = "horizontal",
+        })
+        recipes_flow.style.vertical_align = "center"
+
+        local arrow = recipes_flow.add({
+          type = "label",
+          caption = "→",
+        })
+        arrow.style.font = "default-semibold"
+        arrow.style.left_margin = 12
+        arrow.style.right_margin = 8
+
+        local table_cols = 12
+        local recipe_table = recipes_flow.add({
+          type = "table",
+          column_count = table_cols,
+        })
+        recipe_table.style.horizontal_spacing = 2
+        recipe_table.style.vertical_spacing = 2
+
+        for _, r_name in ipairs(filtered_recipes) do
+          local r_proto = prototypes.recipe[r_name]
+          if r_proto then
+            local is_unlocked = player.force.recipes[r_name] and player.force.recipes[r_name].enabled or false
+            local btn_style = is_unlocked and "slot_button" or "red_slot_button"
+            
+            local tech_name = recipe_to_tech[r_name]
+            local tooltip_str
+            if not is_unlocked and tech_name then
+              local tech_proto = prototypes.technology[tech_name]
+              local tech_localised = tech_proto and tech_proto.localised_name or tech_name
+              tooltip_str = {"", r_proto.localised_name, "\n", {"gui.planet-recipes-locked-by", tech_localised}}
+            else
+              tooltip_str = r_proto.localised_name
+            end
+
+            recipe_table.add({
+              type = "sprite-button",
+              sprite = "recipe/" .. r_name,
+              style = btn_style,
+              tooltip = tooltip_str,
+              tags = {action = "click_recipe", recipe = r_name}
+            })
+          end
+        end
+      end
+    end
+
+    if not displayed_any then
+      local label = scroll_pane.add({
+        type = "label",
+        caption = "No recipes found matching current filters/search.",
+      })
+      label.style.font = "default-semibold"
+      label.style.top_margin = 10
+    end
+
+  else
+    -- "research" tab (which is "Recipes")
+    scroll_pane.style.width = 460
+
+    -- Gather all recipes matching search query for the selected group(s)
+    local recipes_to_show = {}
+    local search_query = player_state.search_query
+
+    local function should_show_recipe(r_name)
+      return research_recipes[r_name] and research_recipes[r_name][active_planet] or false
+    end
+
+    if active_group == "all" then
+      for g_name, group_data in pairs(planet_data) do
+        for sg_name, recipes in pairs(group_data) do
+          for _, r_name in ipairs(recipes) do
+            if should_show_recipe(r_name) and match_query(r_name, search_query) then
+              table.insert(recipes_to_show, r_name)
+            end
+          end
+        end
+      end
+    else
+      local group_data = planet_data[active_group] or {}
       for sg_name, recipes in pairs(group_data) do
         for _, r_name in ipairs(recipes) do
-          if match_query(r_name, search_query) then
+          if should_show_recipe(r_name) and match_query(r_name, search_query) then
             table.insert(recipes_to_show, r_name)
           end
         end
       end
     end
-  else
-    -- Filter recipes only in the single active group
-    local group_data = planet_data[active_group] or {}
-    for sg_name, recipes in pairs(group_data) do
-      for _, r_name in ipairs(recipes) do
-        if match_query(r_name, search_query) then
-          table.insert(recipes_to_show, r_name)
+
+    -- Sort recipes
+    table.sort(recipes_to_show, function(a, b)
+      local tech_order_a = get_recipe_tech_order(a, active_planet)
+      local tech_order_b = get_recipe_tech_order(b, active_planet)
+      if tech_order_a ~= tech_order_b then
+        return tech_order_a < tech_order_b
+      end
+
+      local proto_a = prototypes.recipe[a]
+      local proto_b = prototypes.recipe[b]
+      
+      local g_a = proto_a.group.name
+      local g_b = proto_b.group.name
+      if g_a ~= g_b then
+        local order_g_a = prototypes.item_group[g_a] and prototypes.item_group[g_a].order or ""
+        local order_g_b = prototypes.item_group[g_b] and prototypes.item_group[g_b].order or ""
+        if order_g_a ~= order_g_b then
+          return order_g_a < order_g_b
         end
+        return g_a < g_b
       end
-    end
-  end
-
-  -- Sort recipes: Tech tree order first (chronological progression), then Group order, then Subgroup order, then Recipe order
-  table.sort(recipes_to_show, function(a, b)
-    -- 1. Sort by Tech discovery order index
-    local tech_order_a = get_recipe_tech_order(a, active_planet)
-    local tech_order_b = get_recipe_tech_order(b, active_planet)
-    if tech_order_a ~= tech_order_b then
-      return tech_order_a < tech_order_b
-    end
-
-    -- 2. Fallback to Group order
-    local proto_a = prototypes.recipe[a]
-    local proto_b = prototypes.recipe[b]
-    
-    local g_a = proto_a.group.name
-    local g_b = proto_b.group.name
-    
-    if g_a ~= g_b then
-      local order_g_a = prototypes.item_group[g_a] and prototypes.item_group[g_a].order or ""
-      local order_g_b = prototypes.item_group[g_b] and prototypes.item_group[g_b].order or ""
-      if order_g_a ~= order_g_b then
-        return order_g_a < order_g_b
+      
+      local sg_a = proto_a.subgroup.name
+      local sg_b = proto_b.subgroup.name
+      if sg_a ~= sg_b then
+        local order_sg_a = prototypes.item_subgroup[sg_a] and prototypes.item_subgroup[sg_a].order or ""
+        local order_sg_b = prototypes.item_subgroup[sg_b] and prototypes.item_subgroup[sg_b].order or ""
+        if order_sg_a ~= order_sg_b then
+          return order_sg_a < order_sg_b
+        end
+        return sg_a < sg_b
       end
-      return g_a < g_b
-    end
-    
-    -- 3. Fallback to Subgroup order
-    local sg_a = proto_a.subgroup.name
-    local sg_b = proto_b.subgroup.name
-    if sg_a ~= sg_b then
-      local order_sg_a = prototypes.item_subgroup[sg_a] and prototypes.item_subgroup[sg_a].order or ""
-      local order_sg_b = prototypes.item_subgroup[sg_b] and prototypes.item_subgroup[sg_b].order or ""
-      if order_sg_a ~= order_sg_b then
-        return order_sg_a < order_sg_b
+      
+      local order_a = proto_a.order or ""
+      local order_b = proto_b.order or ""
+      if order_a ~= order_b then
+        return order_a < order_b
       end
-      return sg_a < sg_b
-    end
-    
-    -- 4. Fallback to Recipe order
-    local order_a = proto_a.order or ""
-    local order_b = proto_b.order or ""
-    if order_a ~= order_b then
-      return order_a < order_b
-    end
-    return a < b
-  end)
+      return a < b
+    end)
 
-  if #recipes_to_show > 0 then
-    local grid = scroll_pane.add({
-      type = "table",
-      column_count = 10,
-    })
-    grid.style.horizontal_spacing = 2
-    grid.style.vertical_spacing = 2
-
-    for _, r_name in ipairs(recipes_to_show) do
-      local proto = prototypes.recipe[r_name]
-      local is_unlocked = player.force.recipes[r_name] and player.force.recipes[r_name].enabled or false
-      local style = is_unlocked and "slot_button" or "red_slot_button"
-
-      -- Tooltip calculation showing technology requirements for locked recipes
-      local tech_name = recipe_to_tech[r_name]
-      local tooltip
-      if not is_unlocked and tech_name then
-        local tech_proto = prototypes.technology[tech_name]
-        local tech_localised = tech_proto and tech_proto.localised_name or tech_name
-        tooltip = {"", proto.localised_name, "\n", {"gui.planet-recipes-locked-by", tech_localised}}
-      else
-        tooltip = proto.localised_name
-      end
-
-      grid.add({
-        type = "sprite-button",
-        sprite = "recipe/" .. r_name,
-        style = style,
-        tooltip = tooltip,
-        tags = {action = "click_recipe", recipe = r_name}
+    if #recipes_to_show > 0 then
+      local grid = scroll_pane.add({
+        type = "table",
+        column_count = 10,
       })
+      grid.style.horizontal_spacing = 2
+      grid.style.vertical_spacing = 2
+
+      for _, r_name in ipairs(recipes_to_show) do
+        local proto = prototypes.recipe[r_name]
+        local is_unlocked = player.force.recipes[r_name] and player.force.recipes[r_name].enabled or false
+        local style = is_unlocked and "slot_button" or "red_slot_button"
+
+        local tech_name = recipe_to_tech[r_name]
+        local tooltip
+        if not is_unlocked and tech_name then
+          local tech_proto = prototypes.technology[tech_name]
+          local tech_localised = tech_proto and tech_proto.localised_name or tech_name
+          tooltip = {"", proto.localised_name, "\n", {"gui.planet-recipes-locked-by", tech_localised}}
+        else
+          tooltip = proto.localised_name
+        end
+
+        grid.add({
+          type = "sprite-button",
+          sprite = "recipe/" .. r_name,
+          style = style,
+          tooltip = tooltip,
+          tags = {action = "click_recipe", recipe = r_name}
+        })
+      end
     end
   end
 end
@@ -764,6 +1051,7 @@ end
 -- Rebuild all GUI content in-place
 local function rebuild_gui_content(player)
   rebuild_planet_header(player)
+  rebuild_subtabs(player)
   rebuild_group_column(player)
   rebuild_recipe_grid(player)
 end
@@ -777,6 +1065,7 @@ local function get_or_create_gui(player)
       active_planet = nil,
       active_group = nil,
       search_query = nil,
+      active_tab = "research",
       planet_page = 1,
     }
     storage.players[player.index] = player_state
@@ -822,6 +1111,9 @@ local function get_or_create_gui(player)
   if not player_state.search_query then
     player_state.search_query = ""
   end
+  if not player_state.active_tab then
+    player_state.active_tab = "research"
+  end
 
   -- Calculate the correct page index for the active planet tab (using page size of 8)
   player_state.planet_page = find_planet_page(player_state.active_planet, planet_list, 8)
@@ -833,7 +1125,7 @@ local function get_or_create_gui(player)
     direction = "vertical",
   })
   window.style.width = 540
-  window.style.height = 490 -- Made slightly taller to comfortably fit the 2nd row of tabs
+  window.style.height = 525 -- Made taller to fit planet tabs, sub-tabs, and grid
   window.auto_center = true
   player_state.window = window
   player.opened = window
@@ -879,7 +1171,16 @@ local function get_or_create_gui(player)
     direction = "horizontal",
   })
 
-  -- 3. Search Bar Container
+  -- 3. Sub-tabs container
+  local subtab_flow = window.add({
+    type = "flow",
+    name = "subtab_flow",
+    direction = "horizontal",
+  })
+  subtab_flow.style.bottom_padding = 6
+  subtab_flow.style.horizontal_spacing = 4
+
+  -- 4. Search Bar Container
   local search_flow = window.add({
     type = "flow",
     name = "search_flow",
@@ -900,7 +1201,7 @@ local function get_or_create_gui(player)
   })
   search_field.style.width = 200
 
-  -- 4. Main Area
+  -- 5. Main Area
   local main_body = window.add({
     type = "flow",
     name = "main_body",
@@ -942,6 +1243,7 @@ local function get_or_create_gui(player)
 
   -- Draw the contents inside the skeleton
   rebuild_planet_header(player)
+  rebuild_subtabs(player)
   rebuild_group_column(player)
   rebuild_recipe_grid(player)
 
@@ -978,6 +1280,7 @@ local function init_players()
       active_planet = nil,
       active_group = nil,
       search_query = nil,
+      active_tab = "research",
       planet_page = 1,
     }
   end
@@ -1006,6 +1309,8 @@ script.on_configuration_changed(function()
   organized_recipes = nil
   recipe_to_tech = nil
   tech_orders = nil
+  research_recipes = nil
+  crafting_recipes = nil
   verify_cache()
   init_players()
 
@@ -1022,6 +1327,7 @@ script.on_event(defines.events.on_player_created, function(event)
     active_planet = nil,
     active_group = nil,
     search_query = nil,
+    active_tab = "research",
     planet_page = 1,
   }
 end)
@@ -1059,6 +1365,14 @@ script.on_event(defines.events.on_gui_click, function(event)
   elseif tags.action == "select_group" then
     if player_state then
       player_state.active_group = tags.group
+      rebuild_group_column(player)
+      rebuild_recipe_grid(player)
+    end
+  elseif tags.action == "select_subtab" then
+    if player_state then
+      player_state.active_tab = tags.subtab
+      player_state.active_group = "all"
+      rebuild_subtabs(player)
       rebuild_group_column(player)
       rebuild_recipe_grid(player)
     end

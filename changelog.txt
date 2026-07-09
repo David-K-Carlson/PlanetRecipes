@@ -1,3 +1,11 @@
+---------------------------------------------------------------------------------------------------
+Version: 1.1.0
+Date: 07. 09. 2026
+  Bugfixes:
+    - Fixed unintended recipes showing up
+  Features:
+    - Added "Planet requirements" subtab; shows what recipes *require* this planet.
+---------------------------------------------------------------------------------------------------
 Version: 1.0.1
 Date: 07. 06. 2026
   Changes:
